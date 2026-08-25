@@ -2,3 +2,5 @@ node_modules/
 dist/
 .mesh/
 *.log
+.pi/**
+.lpt/**
