@@ -11,6 +11,7 @@ import {
   SHA256_HEX_REGEX,
 } from "../shared/config.js";
 import { makeMsgId, nowIso, sha256 } from "./frames.js";
+import type { SemanticIdentity } from "../shared/semantic.js";
 
 export type MeshPriority = "normal" | "urgent" | "force";
 export type MeshRole = "member" | "observer";
@@ -74,6 +75,10 @@ export interface MeshFrame {
   reads?: string;
   /** shared auth token hash (hello only) — required on tcp/tls brokers. */
   token?: string;
+  /** semantic identity supplied by a Pi agent; broker assigns the alias. */
+  semanticIdentity?: SemanticIdentity;
+  /** previously assigned semantic alias, used only when its tuple still matches. */
+  preferredAlias?: string;
   /** M1: extension version of the sender (hello) — shown in status snapshots
   *  so stale sessions are visible at a glance. */
   clientVersion?: string;
@@ -101,6 +106,8 @@ export const FRAME_TYPES = [
   "ping",
   "pong",
   "activity",
+  "identity_update",
+  "alias_changed",
   "error",
 ] as const;
 export type MeshFrameType = (typeof FRAME_TYPES)[number];
@@ -237,6 +244,8 @@ export interface BuildFrameOpts {
   totalCount?: number;
   reads?: string;
   token?: string;
+  semanticIdentity?: SemanticIdentity;
+  preferredAlias?: string;
   /** M1: extension version (hello). */
   clientVersion?: string;
   /** M2: broker counters (status_res). */
@@ -279,6 +288,8 @@ export function buildFrame(opts: BuildFrameOpts): MeshFrame {
   if (opts.totalCount !== undefined) frame.totalCount = opts.totalCount;
   if (opts.reads !== undefined) frame.reads = opts.reads;
   if (opts.token !== undefined) frame.token = opts.token;
+  if (opts.semanticIdentity !== undefined) frame.semanticIdentity = { ...opts.semanticIdentity };
+  if (opts.preferredAlias !== undefined) frame.preferredAlias = opts.preferredAlias;
   if (opts.clientVersion !== undefined) frame.clientVersion = opts.clientVersion;
   if (opts.stats !== undefined) frame.stats = { ...opts.stats };
   return frame;
@@ -329,6 +340,24 @@ export function validateFrame(value: unknown, opts: ValidateOpts = {}): Validati
     if (alias !== undefined && (typeof alias !== "string" || !isValidAlias(alias))) {
       return { ok: false, code: "invalid_alias", detail: `bad ${key}` };
     }
+  }
+
+  if (value.semanticIdentity !== undefined) {
+    if (value.type !== "hello" && value.type !== "identity_update" && value.type !== "alias_changed") {
+      return { ok: false, code: "invalid_frame", detail: "semanticIdentity on invalid frame" };
+    }
+    const identity = value.semanticIdentity;
+    if (identity === null || typeof identity !== "object" || Array.isArray(identity)) {
+      return { ok: false, code: "invalid_frame", detail: "bad semanticIdentity" };
+    }
+    for (const key of ["repo", "worktree", "role"] as const) {
+      if (typeof (identity as Record<string, unknown>)[key] !== "string" || (identity as Record<string, unknown>)[key] === "") {
+        return { ok: false, code: "invalid_frame", detail: `bad semanticIdentity.${key}` };
+      }
+    }
+  }
+  if (value.preferredAlias !== undefined && (typeof value.preferredAlias !== "string" || !isValidAlias(value.preferredAlias))) {
+    return { ok: false, code: "invalid_alias", detail: "bad preferredAlias" };
   }
 
   // Rule 3: room

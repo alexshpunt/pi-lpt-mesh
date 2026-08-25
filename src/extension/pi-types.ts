@@ -77,7 +77,7 @@ export interface SessionContext {
     getSessionId(): string;
     getSessionFile?(): string;
   };
-  /** Pi command actions — newSession lets /mesh new open a fresh session.
+  /** Pi command actions — newSession opens a fresh session.
   *  Direct method on the command context (not under actions). Post-replacement
   *  work must go through withSession (the old ctx is stale after the call). */
   newSession?(opts?: {

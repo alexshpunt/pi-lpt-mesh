@@ -1,9 +1,12 @@
 // broker/state.ts — in-memory tables only; presence = live connections.
 import type { Socket } from "node:net";
 import type { MeshFrame, MeshRole, FileReservation } from "../protocol/envelope.js";
+import type { SemanticIdentity } from "../shared/semantic.js";
 
 export interface PeerRecord {
   alias: string;
+  semanticIdentity?: SemanticIdentity;
+  semantic?: boolean;
   socket: Socket;
   rooms: Map<string, MeshRole>;
   pid?: number;
@@ -54,6 +57,8 @@ export class BrokerState {
   *  Map<alias, lastHelloAt> — stale aliases are pruned by the sweep
   *  (no live peer, no mailbox, unseen > 24 h). */
   readonly knownAliases = new Map<string, number>();
+  /** Semantic aliases are online-only and never mailbox eligible. */
+  readonly semanticAliases = new Set<string>();
   readonly stats: BrokerStats = {
     startedAt: Date.now(),
     relayed: 0,

@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import path from "node:path";
 import { nowIso } from "../protocol/frames.js";
 import { isValidReservations, type FileReservation } from "../protocol/envelope.js";
+import { normalizeSemanticIdentity, type SemanticIdentity } from "../shared/semantic.js";
 
 export const IDENTITY_FILE_NAME = "identity.json"; // legacy single-file name
 export const IDENTITY_PREFIX = "identity-";
@@ -28,13 +29,14 @@ export const IDENTITY_PENDING_NAME = "identity-pending.json";
 export const IDENTITY_VERSION = 1;
 /** Persisted reservations older than this are NOT re-declared at hello. */
 export const RESERVATION_TTL_MS = 86_400_000; // 24 h
-/** a /mesh new handoff is only valid for this long. */
+/** A staged identity handoff is only valid for this long. */
 export const PENDING_TTL_MS = 900_000; // 15 min
 
 export interface PersistedIdentity {
   version: typeof IDENTITY_VERSION;
   sessionId: string;
   alias: string;
+  semanticIdentity?: SemanticIdentity;
   rooms: string[];
   reservations: FileReservation[];
   updatedAt: string;
@@ -45,6 +47,7 @@ export function identityFromClient(
   sessionId: string,
   client: {
     alias: string;
+    semanticIdentity?: SemanticIdentity;
     rooms: readonly string[];
     reservations: readonly FileReservation[];
   },
@@ -53,6 +56,7 @@ export function identityFromClient(
     version: IDENTITY_VERSION,
     sessionId,
     alias: client.alias,
+    semanticIdentity: client.semanticIdentity === undefined ? undefined : { ...client.semanticIdentity },
     rooms: [...client.rooms],
     reservations: client.reservations.map((r) => ({ ...r })),
     updatedAt: nowIso(),
@@ -92,6 +96,10 @@ export class MeshIdentity {
       const rooms = Array.isArray(id.rooms)
         ? id.rooms.filter((r): r is string => typeof r === "string")
         : [];
+      let semanticIdentity: SemanticIdentity | undefined;
+      if (id.semanticIdentity !== undefined) {
+        try { semanticIdentity = normalizeSemanticIdentity(id.semanticIdentity); } catch { return null; }
+      }
       const reservations = isValidReservations(id.reservations)
         ? freshReservations(id.reservations)
         : [];
@@ -99,6 +107,7 @@ export class MeshIdentity {
         version: IDENTITY_VERSION,
         sessionId,
         alias: id.alias,
+        semanticIdentity,
         rooms,
         reservations,
         updatedAt: typeof id.updatedAt === "string" ? id.updatedAt : nowIso(),
@@ -139,9 +148,8 @@ export class MeshIdentity {
   }
 
   /**
-  * factory-reset this session's identity — /mesh reset behaves like
-  * /new (fresh alias, default rooms, no reservations) while staying in the
-  * same pi session. Best effort — never throws.
+  * Remove this session's persisted identity while staying in the same
+  * Pi session. Best effort — never throws.
   */
   reset(sessionId: string): void {
     if (sessionId === "") return;
@@ -152,16 +160,16 @@ export class MeshIdentity {
     }
   }
 
-  // ---- /mesh new identity handoff ----
+  // ---- staged identity handoff ----
 
   private get pendingPath(): string {
     return path.join(this.stateDir, IDENTITY_PENDING_NAME);
   }
 
   /**
-  * Stage the current identity for the NEXT session (created by /mesh new)
-  * alias + rooms + reservations (and optionally a compact history) travel
-  * through identity-pending.json, consumed by the next session_start.
+  * Stage the current identity for the next session. Alias, rooms, and
+  * reservations (and optionally compact history) travel through the pending
+  * file and are consumed by the next session_start.
   */
   savePending(
     identity: PersistedIdentity,

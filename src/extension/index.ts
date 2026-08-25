@@ -22,10 +22,12 @@ import { MeshTranscript } from "./transcript.js";
 import { analyzeTurn, countRejected, countToolCalls, renderVerdict, type TurnSample } from "./watchdog.js";
 import type { MeshFrame } from "../protocol/envelope.js";
 import type { SessionContext } from "./pi-types.js";
+import { deriveSemanticIdentity } from "./semantic-identity.js";
 
 export default function meshExtension(pi: ExtensionAPI): void {
   let runtime: MeshRuntime | null = null;
   let hud: MeshHud | null = null;
+  let semanticMonitor: NodeJS.Timeout | null = null;
   const getRuntime = (): MeshRuntime | null => runtime;
 
   // Tools + command are registered IMMEDIATELY (they answer `blocked` offline).
@@ -101,8 +103,8 @@ export default function meshExtension(pi: ExtensionAPI): void {
   // mesh identity when the extension is reloaded.
     const sessionId = ctx.sessionManager?.getSessionId() ?? "";
     const identity = new MeshIdentity(sDir);
-  // /mesh new handoff — the staged identity (alias/rooms/reservations
-  // and optionally the history) is consumed by the next session_start.
+  // A staged identity (alias, rooms, reservations, and optional history) is
+  // consumed by the next session_start.
     let persisted: PersistedIdentity | null = identity.load(sessionId);
     let pendingHistory: string[] | undefined;
     if (persisted === null) {
@@ -112,9 +114,16 @@ export default function meshExtension(pi: ExtensionAPI): void {
         pendingHistory = pending.history;
       }
     }
+    const semanticIdentity = deriveSemanticIdentity(process.cwd());
+    if (process.env.MESH_ALIAS !== undefined && process.env.MESH_ALIAS.trim() !== "") {
+      ctx.ui.notify("mesh: MESH_ALIAS is ignored; semantic aliases are mandatory", { level: "warning" });
+    }
+    const sameIdentity = persisted?.semanticIdentity !== undefined &&
+      JSON.stringify(persisted.semanticIdentity) === JSON.stringify(semanticIdentity);
     const client = new MeshClient({
-  // explicit config.alias always wins; then the persisted alias; else random
-      alias: config.alias ?? persisted?.alias,
+      alias: sameIdentity ? persisted?.alias : undefined,
+      semanticIdentity,
+      preferredAlias: sameIdentity ? persisted?.alias : undefined,
       rooms: persisted !== null && persisted.rooms.length > 0 ? persisted.rooms : config.rooms,
       initialReservations: persisted?.reservations,
       runtimeDir: rDir,
@@ -193,6 +202,18 @@ export default function meshExtension(pi: ExtensionAPI): void {
     };
 
     attachClientListeners(pi, rt, getHudRef, ctx, client, saveIdentity);
+    if (semanticMonitor !== null) clearInterval(semanticMonitor);
+    semanticMonitor = setInterval(() => {
+      try {
+        const next = deriveSemanticIdentity(process.cwd());
+        if (JSON.stringify(next) !== JSON.stringify(client.semanticIdentity)) {
+          void client.updateSemanticIdentity(next).then(() => saveIdentity(rt));
+        }
+      } catch {
+        // Identity polling is best effort; the current broker identity remains live.
+      }
+    }, 1000);
+    semanticMonitor.unref();
 
   // Phase 3: announce turn state to the mesh — busy on the first tool
   // call of a turn, idle when the whole run settles. Only on CHANGE
@@ -321,9 +342,8 @@ export default function meshExtension(pi: ExtensionAPI): void {
     client.connect().catch(() => {});
   });
 
-  // a pi FORK creates a fresh session — hand the mesh identity over
-  // (like /mesh new, without history) so the forked session keeps alias,
-  // rooms and reservations instead of starting anonymous.
+  // A Pi fork creates a fresh session; hand the mesh identity over so the
+  // forked session keeps its alias, rooms, and reservations.
   // when a tool call ends (e.g. the sleep), the busy period is over —
   // deliver every held inbound message as ONE batch, so the next LLM call
   // sees the whole lot in a single turn instead of one message per turn.
@@ -346,6 +366,10 @@ export default function meshExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    if (semanticMonitor !== null) {
+      clearInterval(semanticMonitor);
+      semanticMonitor = null;
+    }
     const rt = runtime;
     runtime = null;
     const h = hud;

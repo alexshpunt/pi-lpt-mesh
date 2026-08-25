@@ -72,7 +72,7 @@ describe("live inbound entries (D43/B9)", () => {
       { isIdle: () => idle.value } as never,
       me,
       () => {},
-      10_000, // cooldown: 10 s — a fast burst only shows the FIRST entry
+      100, // cooldown: a fast burst only shows the FIRST entry
     );
     await sender.send({ to: "live-me", message: "one" });
     await sender.send({ to: "live-me", message: "two" });
@@ -83,7 +83,7 @@ describe("live inbound entries (D43/B9)", () => {
     assert.equal(live.length, 1, "burst from the same agent collapses to ONE live entry");
     assert.equal(live[0]!.data?.from, "live-src");
     // second burst after the cooldown window → a new live entry
-    await new Promise((r) => setTimeout(r, 10_200));
+    await new Promise((r) => setTimeout(r, 150));
     await sender.send({ to: "live-me", message: "four" });
     await new Promise((r) => setTimeout(r, 300));
     const live2 = entries.filter((e) => e.customType === "mesh-live");

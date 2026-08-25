@@ -37,7 +37,7 @@ export interface MeshRuntime {
   sessionId: string;
   /** Identity persistence (alias/rooms/reservations survive reloads). */
   identity: MeshIdentity;
-  /** transferred history from a /mesh new handoff (injected at ready). */
+  /** transferred history from a previous session handoff (injected at ready). */
   pendingHistory?: string[];
   /** inbound batching (flush remaining frames on shutdown). */
   batcher?: { flushNow(): void };

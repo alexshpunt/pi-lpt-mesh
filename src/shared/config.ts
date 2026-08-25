@@ -86,7 +86,7 @@ export type ContextVerbosity = "compact" | "full";
 // ---- Identity defaults ----
 export const ALIAS_RAND_CHARS = 6;
 export const MSG_ID_RAND_CHARS = 8;
-export const ALIAS_REGEX = /^[a-z][a-z0-9-]{1,31}$/;
+export const ALIAS_REGEX = /^[a-z][a-z0-9-]*$/;
 export const ROOM_REGEX = /^[a-z0-9][a-z0-9.-]{0,63}$/;
 export const SHA256_HEX_REGEX = /^[0-9a-f]{64}$/;
 

@@ -10,16 +10,14 @@ duplicates, loops and confusion.
 
 ## Know your identity
 
-- Your alias is injected at session start: `[mesh] you are @<alias> (rooms: …)`.
-  It is **stable across /reload** and only changes via `/mesh alias <name>`,
-  `/mesh reset` (fresh random alias) or `/mesh new` (identity handed to the
-  next session).
+- Your semantic alias is injected at session start: `[mesh] you are @<repo>-<worktree>-<role>[-index] (rooms: …)`.
+  It is **stable across /reload** when the repository, worktree, and role stay the same.
+  The broker changes it automatically when those components change; manual alias overrides are not available.
 - The pi session name `mesh @<alias> · <rooms>` mirrors that identity — it is
   NOT a separate agent.
 - **If in doubt, `mesh_status` shows your alias** (first line) and who is
   online. Never guess who you are from the conversation alone.
-- A session that inherits an alias (e.g. `/mesh new` handoff) IS that agent:
-  same alias, same rooms, same reservations.
+- A session that survives `/reload` keeps the same semantic alias, rooms, and reservations.
 - You can NEVER take an alias held by a live peer (`alias_taken`): the error
   names the holder. Close that session first, or pick another alias.
 
@@ -33,7 +31,7 @@ duplicates, loops and confusion.
 
 ## Sending
 
-- `mesh_send { to: "agent-X", message }` — direct message (shared room
+- `mesh_send { to: "<repo>-<worktree>-<role>[-index]", message }` — direct message (shared room
   required).
 - **Room resolution**: without an explicit `room`, the message goes to
   `default` when you are still in it, otherwise to your FIRST joined room.

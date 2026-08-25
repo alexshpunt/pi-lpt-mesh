@@ -1,25 +1,18 @@
 // extension/commands.ts — /mesh command. All output via ctx.ui.notify.
 import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
-import { MeshClient } from "../client/client.js";
 import type { MeshRole } from "../protocol/envelope.js";
-import { loadConfig } from "../shared/config.js";
 import { brokerLockPath, brokerSocketPath } from "../shared/paths.js";
 import { MESH_VERSION } from "../shared/version.js";
-import { attachClientListeners, updateSessionName } from "./attach.js";
+import { updateSessionName } from "./attach.js";
 import type { MeshHud } from "./hud.js";
 import { identityFromClient } from "./identity.js";
 import type { ExtensionAPI, SessionContext } from "./pi-types.js";
 import type { GetRuntime, MeshRuntime } from "./tools.js";
 
-const HELP_TEXT = [
+export const HELP_TEXT = [
   "/mesh status [room]   — broker snapshot (online peers, rooms)",
-  "/mesh join <room> [as <alias>] [observer]",
+  "/mesh join <room> [observer]",
   "/mesh leave <room>",
-  "/mesh alias [<new-alias>] — show, or change this session's alias live",
-  "/mesh new [--history]  — fresh pi session like /new, mesh identity (alias, rooms,",
-  "                         reservations) handed over; --history carries the last frames",
-  "/mesh reset            — factory-reset the mesh identity (like /new: fresh alias,",
-  "                         default rooms, no reservations) WITHOUT leaving this session",
   "/mesh log [on|off]    — opt-in transcript (redacted bodies)",
   "/mesh ping <alias>    — send a one-shot ping message",
   "/mesh stale           — reservations held by peers, with age (TTL insight)",
@@ -40,22 +33,11 @@ function persistIdentity(rt: MeshRuntime): void {
   }
 }
 
-/**
- * Parse `/mesh join <room> [as <alias>] [observer]` args.
- * Pure, exported for tests.
- */
-export function parseJoinArgs(args: string[]): {
-  room?: string;
-  asAlias?: string;
-  observer: boolean;
-} {
-  const rest = args.filter((a) => a !== "observer");
+/** Parse `/mesh join <room> [observer]` args. */
+export function parseJoinArgs(args: string[]): { room?: string; observer: boolean } {
   const observer = args.includes("observer");
-  const asIdx = rest.indexOf("as");
-  if (asIdx === -1) return { room: rest[0], observer };
-  const asAlias = rest[asIdx + 1];
-  if (asIdx === 0) return { asAlias, observer };
-  return { room: rest[0], asAlias, observer };
+  if (args.includes("as")) return { room: undefined, observer };
+  return { room: args.find((a) => a !== "observer"), observer };
 }
 
 function pidAlive(pid: number): boolean {
@@ -92,25 +74,10 @@ async function cmdJoin(
   ctx: SessionContext,
   room: string | undefined,
   observer: boolean,
-  asAlias: string | undefined,
   pi: ExtensionAPI,
 ): Promise<void> {
-  // `/mesh join <room> as <alias>`: rename first (re-hello), then join.
-  // A rename failure NEVER aborts the join — the session keeps its current
-  // alias and still joins the room (same_alias is a no-op success).
-  if (asAlias !== undefined) {
-    const renamed = await rt.client.rename(asAlias);
-    if (renamed.ok) {
-      if (renamed.unchanged !== true) {
-        notify(ctx, `mesh: alias changed @${renamed.alias}`);
-        persistIdentity(rt);
-      }
-    } else {
-      notify(ctx, `mesh: rename to "${asAlias}" failed: ${renamed.reason} — joining as @${rt.client.alias}`);
-    }
-  }
   if (room === undefined) {
-    notify(ctx, "usage: /mesh join <room> [as <alias>] [observer]");
+    notify(ctx, "usage: /mesh join <room> [observer]");
     return;
   }
   const role: MeshRole = observer ? "observer" : "member";
@@ -147,122 +114,8 @@ async function cmdLeave(rt: MeshRuntime, ctx: SessionContext, room: string | und
   }
 }
 
-async function cmdAlias(rt: MeshRuntime, ctx: SessionContext, alias: string | undefined, pi: ExtensionAPI): Promise<void> {
-  if (alias === undefined) {
-    notify(ctx, `mesh alias: @${rt.client.alias}`);
-    return;
-  }
-  const renamed = await rt.client.rename(alias);
-  if (renamed.ok) {
-    if (renamed.unchanged !== true) {
-      notify(ctx, `mesh: alias changed @${renamed.alias}`);
-      persistIdentity(rt);
-      updateSessionName(pi, rt);
-    } else {
-      notify(ctx, `mesh alias: @${rt.client.alias}`);
-    }
-  } else {
-    let hint = "";
-    if (renamed.reason === "alias_taken") {
-  // tell the user WHO holds the alias — a live peer keeps it until it
-  // disconnects, so a rename can never steal it.
-      try {
-        const snap = await rt.client.status();
-        const holder = snap.peers.find((p) => p.alias === alias);
-        if (holder !== undefined) {
-          hint = ` — @${holder.alias} is connected${holder.since !== undefined ? ` since ${holder.since}` : ""}`;
-        }
-      } catch {
-  // best effort — the hint must never break the error path
-      }
-    }
-    notify(ctx, `mesh: rename to "${alias}" failed: ${renamed.reason}${hint}`);
-  }
-}
-
-async function cmdNew(
-  rt: MeshRuntime,
-  ctx: SessionContext,
-  withHistory: boolean,
-): Promise<void> {
-  // /mesh new — like pi's /new (fresh conversation) but the mesh
-  // identity (alias, rooms, reservations) is handed to the NEXT session via
-  // identity-pending.json; the next session_start consumes it.
-  const history = withHistory
-    ? rt.client.transcript
-        .slice(-30)
-        .map(
-          (f) =>
-            `${f.ts.slice(11, 19)} ${f.type} ${f.from ?? "?"}→${f.to ?? "*"}: ${(f.body ?? "").slice(0, 120)}`,
-        )
-    : undefined;
-  rt.identity.savePending(identityFromClient(rt.sessionId, rt.client), history);
-  if (typeof ctx.newSession !== "function") {
-    notify(ctx, "mesh: /mesh new requires a TUI session (newSession unavailable)");
-    return;
-  }
-  // The ctx becomes STALE after newSession resolves — notify BEFORE, and
-  // do any post-replacement work inside withSession (fresh ctx).
-  notify(ctx, `mesh: opening a new session — @${rt.client.alias} handed off (rooms/reservations kept)`);
-  const res = await ctx.newSession({
-    withSession: async (newCtx) => {
-  // fresh session context: report the handoff there
-      try {
-        newCtx.ui?.notify("mesh: identity handoff received — same alias/rooms/reservations", {
-          level: "info",
-        });
-      } catch {
-  // best effort
-      }
-    },
-  });
-  // NOTE: do NOT touch `ctx` here (stale after newSession). If the user
-  // cancelled, the staged pending expires by itself (PENDING_TTL_MS).
-  void res;
-}
-
-async function cmdReset(
-  rt: MeshRuntime,
-  ctx: SessionContext,
-  pi: ExtensionAPI,
-  getHud: () => MeshHud | null,
-): Promise<void> {
-  // like /new (fresh alias, default rooms, no reservations) but stays in
-  // this pi session, like /reload does for identity preservation.
-  const oldAlias = rt.client.alias;
-  // 1. leave the mesh cleanly (alias/rooms/reservations purged at the broker)
-  await rt.client.close().catch(() => {});
-  // 2. factory-reset the persisted identity for this session
-  rt.identity.reset(rt.sessionId);
-  // 3. spawn a fresh client in-place (same runtime object, re-attached)
-  const config = loadConfig(rt.stateDir);
-  const fresh = new MeshClient({
-    alias: config.alias, // explicit config.alias wins; otherwise random
-    rooms: config.rooms,
-    runtimeDir: rt.runtimeDir,
-    config,
-  });
-  rt.client = fresh;
-  attachClientListeners(pi, rt, getHud, ctx, fresh, (r) => {
-    try {
-      r.identity.save(identityFromClient(r.sessionId, r.client));
-    } catch {
-  // best effort
-    }
-  });
-  try {
-    await fresh.connect();
-    updateSessionName(pi, rt);
-    notify(
-      ctx,
-      `mesh: identity reset — was @${oldAlias}, now @${fresh.alias} (rooms: ${fresh.rooms.join(",") || "default"})`,
-    );
-  } catch {
-    notify(ctx, "mesh: reset — broker unavailable, tools answer blocked");
-  }
-}
-
-function cmdLog(rt: MeshRuntime, ctx: SessionContext, arg: string | undefined): void {
+function cmdLog(
+  rt: MeshRuntime, ctx: SessionContext, arg: string | undefined): void {
   if (arg === "on") {
     rt.transcript.setEnabled(true);
     notify(ctx, "mesh: transcript ON (bodies redacted, retention applies)");
@@ -398,7 +251,7 @@ function cmdBroker(rt: MeshRuntime, ctx: SessionContext): void {
   if (health !== null) {
     lines.push(`  session file: ${health.sizeMb.toFixed(1)} MB · ${health.compactions} compaction(s)`);
     if (health.sizeMb > 15) {
-      lines.push(`  hint: /mesh new recommended (context pressure — identity is handed over)`);
+      lines.push(`  hint: start a fresh Pi session soon (context pressure)`);
     }
   }
   notify(ctx, lines.join("\n"));
@@ -411,7 +264,7 @@ export function registerCommands(
   getHud: () => MeshHud | null = () => null,
 ): void {
   pi.registerCommand("mesh", {
-    description: "mesh inter-agent coms: status, join/leave, alias, log, ping, broker",
+    description: "mesh inter-agent coms: status, join/leave, log, ping, broker",
     handler: async (args, ctx) => {
       const rt = getRuntime();
       if (rt === null) {
@@ -424,18 +277,13 @@ export function registerCommands(
           await cmdStatus(rt, ctx, rest[0]);
           break;
         case "join": {
-  // `/mesh join <room> [as <alias>] [observer]`
           const parsed = parseJoinArgs(rest);
-          await cmdJoin(rt, ctx, parsed.room, parsed.observer, parsed.asAlias, pi);
+          await cmdJoin(rt, ctx, parsed.room, parsed.observer, pi);
           onChanged?.();
           break;
         }
         case "leave":
           await cmdLeave(rt, ctx, rest[0], pi);
-          onChanged?.();
-          break;
-        case "alias":
-          await cmdAlias(rt, ctx, rest[0], pi);
           onChanged?.();
           break;
         case "log":
@@ -450,13 +298,6 @@ export function registerCommands(
           break;
         case "broker":
           cmdBroker(rt, ctx);
-          break;
-        case "new":
-          await cmdNew(rt, ctx, rest.includes("--history") || rest.includes("history"));
-          break;
-        case "reset":
-          await cmdReset(rt, ctx, pi, getHud);
-          onChanged?.();
           break;
         case "help":
         case undefined:

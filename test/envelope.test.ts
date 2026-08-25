@@ -85,8 +85,8 @@ describe("envelope: rule 2/3 — alias & room", () => {
     assert.equal(isValidAlias("Alice"), false); // uppercase (normalized before validation)
     assert.equal(isValidAlias("bad_alias"), false); // underscore refused (D4)
     assert.equal(isValidAlias("1abc"), false);
-    assert.equal(isValidAlias("a"), false); // min 2 chars
-    assert.equal(isValidAlias("a".repeat(33)), false);
+    assert.equal(isValidAlias("a"), true); // semantic aliases may be any safe length
+    assert.equal(isValidAlias("a".repeat(256)), true); // frame size remains the safety boundary
   });
 
   it("normalizeAlias trims, strips @, lowercases (E12)", () => {

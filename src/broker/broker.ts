@@ -38,6 +38,7 @@ import {
   presenceFrame,
 } from "./rooms.js";
 import { BrokerState, type PeerRecord } from "./state.js";
+import { normalizeSemanticIdentity, semanticAlias, type SemanticIdentity } from "../shared/semantic.js";
 
 export interface BrokerOptions {
   config: MeshConfig;
@@ -96,6 +97,17 @@ function writeFrame(
 }
 
 export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
+function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, preferred?: string): string {
+  const base = semanticAlias(identity);
+  if (preferred !== undefined && preferred === base && !state.peers.has(preferred)) return preferred;
+  if (preferred !== undefined && preferred.startsWith(`${base}-`) && /^\d+$/.test(preferred.slice(base.length + 1)) && !state.peers.has(preferred)) return preferred;
+  if (!state.peers.has(base)) return base;
+  for (let index = 2; ; index += 1) {
+    const candidate = semanticAlias(identity, index);
+    if (!state.peers.has(candidate)) return candidate;
+  }
+}
+
   const { config, policy } = options;
   const sockPath = options.socketPath ?? brokerSocketPath();
   const state = new BrokerState();
@@ -126,8 +138,8 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
     });
   };
 
-  const sendError = (socket: Socket, code: MeshErrorCode, id?: string): void => {
-    writeFrame(socket, buildFrame({ type: "error", code, id }), config.maxFrameBytes, () => {});
+  const sendError = (socket: Socket, code: MeshErrorCode, id?: string, detail?: string): void => {
+    writeFrame(socket, buildFrame({ type: "error", code, id, body: detail }), config.maxFrameBytes, () => {});
   };
 
   const sendAck = (
@@ -217,16 +229,29 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
 // ---- handlers ----
 
   const handleHello = (socket: Socket, frame: MeshFrame): void => {
-    const alias = frame.from;
+    let semanticIdentity: SemanticIdentity | undefined;
+    let semantic = false;
+    let alias = frame.from;
+    if (frame.semanticIdentity !== undefined) {
+      try {
+        semanticIdentity = normalizeSemanticIdentity(frame.semanticIdentity);
+        alias = allocateSemanticAlias(state, semanticIdentity, frame.preferredAlias);
+        semantic = true;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "invalid semantic identity";
+        sendError(socket, "invalid_alias", frame.id, detail);
+        socket.destroy();
+        return;
+      }
+    }
     if (alias === undefined) {
       sendError(socket, "invalid_alias", frame.id);
       socket.destroy();
       return;
     }
-  // tcp/tls CONNECTIONS require the shared token (sha256 match); local
-  // unix-socket connections are tokenless (protected by file perms).
+
     if (tokenSockets.has(socket)) {
-      const expected = config.brokerToken !== undefined ? sha256(config.brokerToken) : undefined;
+    const expected = config.brokerToken !== undefined ? sha256(config.brokerToken) : undefined;
       if (expected === undefined || frame.token !== expected) {
         sendError(socket, "invalid_token", frame.id);
         socket.destroy();
@@ -235,7 +260,7 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
     }
     const existing = state.peers.get(alias);
     if (existing && existing.socket !== socket && !existing.socket.destroyed) {
-      sendError(socket, "alias_taken", frame.id); // same-tick refusal
+      sendError(socket, "alias_taken", frame.id);
       socket.destroy();
       return;
     }
@@ -243,6 +268,8 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
 
     const peer: PeerRecord = {
       alias,
+      semanticIdentity,
+      semantic,
       socket,
       rooms: new Map(),
       connectedAt: Date.now(),
@@ -261,8 +288,9 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
         ? `${tcp?.tls === true ? "tls" : "tcp"}:${(socket.remoteAddress ?? "?").replace(/^::ffff:/, "")}`
         : undefined,
     };
+    if (semantic) state.semanticAliases.add(alias);
     state.peers.set(alias, peer);
-    state.knownAliases.set(alias, Date.now()); // (re)stamp on every hello
+    if (!semantic) state.knownAliases.set(alias, Date.now());
 
   // rooms — the hello carries the client's EXACT room list. When the
   // field is present (even empty), it is authoritative: a client that
@@ -284,7 +312,7 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
       }
     }
 
-    const mailboxFrames = flushMailbox(state, config, alias);
+    const mailboxFrames = semantic ? [] : flushMailbox(state, config, alias);
     sendTo(
       peer,
       buildFrame({
@@ -300,6 +328,43 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
     announceOnline(state, peer, sendTo);
   // existing peers learn the newcomer's reservations (like presence)
     if (peer.reservations.length > 0) broadcastReservations(state, peer, sendTo);
+  };
+
+  const handleIdentityUpdate = (peer: PeerRecord, frame: MeshFrame): void => {
+    if (frame.semanticIdentity === undefined) {
+      sendError(peer.socket, "invalid_frame", frame.id);
+      return;
+    }
+    let identity: SemanticIdentity;
+    try {
+      identity = normalizeSemanticIdentity(frame.semanticIdentity);
+    } catch {
+      sendError(peer.socket, "invalid_frame", frame.id);
+      return;
+    }
+    const oldAlias = peer.alias;
+    state.peers.delete(oldAlias);
+    state.knownAliases.delete(oldAlias);
+    state.semanticAliases.delete(oldAlias);
+    const nextAlias = allocateSemanticAlias(state, identity, frame.preferredAlias);
+    peer.alias = nextAlias;
+    peer.semantic = true;
+    peer.semanticIdentity = identity;
+    for (const members of state.rooms.values()) {
+      if (members.delete(oldAlias)) members.add(nextAlias);
+    }
+    state.peers.set(nextAlias, peer);
+    state.semanticAliases.add(nextAlias);
+    for (const [alias, rate] of state.rates) {
+      if (alias === oldAlias) {
+        state.rates.delete(alias);
+        state.rates.set(nextAlias, rate);
+        break;
+      }
+    }
+    const changed = buildFrame({ type: "alias_changed", from: oldAlias, to: nextAlias, semanticIdentity: identity });
+    for (const target of state.peers.values()) sendTo(target, changed);
+    sendAck(peer, frame.id, "ok");
   };
 
   const routeMsg = (from: PeerRecord, frame: MeshFrame): void => {
@@ -346,6 +411,7 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
         const t = state.peers.get(alias);
         if (t !== undefined && t.helloDone && !t.socket.destroyed) {
           const target = t;
+          const semanticTarget = target.semantic === true;
           writes.push(
             new Promise<boolean>((resolve) => {
               writeFrame(target.socket, frame, config.maxFrameBytes, (ok) => {
@@ -354,14 +420,16 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
                 } else {
   // identity guard — a re-hello may have replaced the record.
                   if (state.peers.get(target.alias) === target) closePeer(state, target.alias, "write_failure");
-                  enqueueMailbox(state, config, target.alias, frame);
-                  queued += 1;
+                  if (!semanticTarget) {
+                    enqueueMailbox(state, config, target.alias, frame);
+                    queued += 1;
+                  }
                   resolve(false);
                 }
               });
             }),
           );
-        } else if (state.knownAliases.has(alias)) {
+          } else if (state.knownAliases.has(alias) && !state.semanticAliases.has(alias)) {
           enqueueMailbox(state, config, alias, frame);
           queued += 1;
         }
@@ -369,8 +437,8 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
       void Promise.all(writes).then((results) => {
         const delivered = results.filter(Boolean).length;
         state.stats.relayed += delivered;
-        const status: "delivered" | "queued_offline" =
-          delivered > 0 ? "delivered" : "queued_offline";
+        const status: "delivered" | "queued_offline" | "dropped_offline" =
+          delivered > 0 ? "delivered" : queued > 0 ? "queued_offline" : "dropped_offline";
         sendAck(from, frame.id, status, undefined, delivered, total);
       });
       return;
@@ -393,7 +461,7 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
     }
     const target = state.peers.get(to);
     const knownOnline = target !== undefined && target.helloDone && !target.socket.destroyed;
-    if (!knownOnline && !state.knownAliases.has(to)) {
+    if (!knownOnline && (!state.knownAliases.has(to) || state.semanticAliases.has(to))) {
       state.stats.refused += 1;
       sendError(from.socket, "peer_not_found", frame.id);
       return;
@@ -431,6 +499,7 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
 
     if (knownOnline && target) {
       const t = target;
+      const semanticTarget = t.semantic === true;
   // fix: ack(delivered) ONLY after the write to the recipient socket succeeds.
       writeFrame(t.socket, routedFrame, config.maxFrameBytes, (ok) => {
         if (ok) {
@@ -439,8 +508,12 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
         } else {
   // identity guard — a re-hello may have replaced the record.
           if (state.peers.get(t.alias) === t) closePeer(state, t.alias, "write_failure");
-          enqueueMailbox(state, config, t.alias, routedFrame);
-          sendAck(from, frame.id, "queued_offline", interruptStatus);
+          if (semanticTarget) {
+            sendAck(from, frame.id, "dropped_offline", interruptStatus);
+          } else {
+            enqueueMailbox(state, config, t.alias, routedFrame);
+            sendAck(from, frame.id, "queued_offline", interruptStatus);
+          }
         }
       });
     } else {
@@ -525,6 +598,9 @@ export function createBroker(options: BrokerOptions): Promise<RunningBroker> {
   // read receipt → routed to the ORIGINAL sender of the msgId,
   // online-only and silent (never acked, never mailboxed).
         routeRead(peer, frame);
+        break;
+      case "identity_update":
+        handleIdentityUpdate(peer, frame);
         break;
       case "activity": {
   // Phase 3: the peer announces its turn state — stored, then shared
@@ -803,6 +879,7 @@ export function closePeer(
   if (!peer) return;
   const roomIds = detachFromRooms(state, peer);
   state.peers.delete(alias);
+  state.semanticAliases.delete(alias);
   if (!peer.socket.destroyed) peer.socket.destroy();
   for (const roomId of roomIds) {
     broadcastToRoom(

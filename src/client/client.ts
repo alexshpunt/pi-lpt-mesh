@@ -42,6 +42,7 @@ import { runtimeDir, stateDir } from "../shared/paths.js";
 import { MESH_VERSION } from "../shared/version.js";
 import { PendingReplies } from "./pending.js";
 import { backoffMs, ensureBroker } from "./reconnect.js";
+import type { SemanticIdentity } from "../shared/semantic.js";
 
 export interface WelcomeInfo {
   alias: string;
@@ -137,6 +138,10 @@ export function computePeerStatus(
 
 export interface MeshClientOpts {
   alias?: string;
+  /** Structured identity; the broker assigns the final semantic alias. */
+  semanticIdentity?: SemanticIdentity;
+  /** Reload preference for the broker-assigned semantic alias. */
+  preferredAlias?: string;
   rooms?: string[];
   /** Reservations to declare at hello (persisted identity reload). */
   initialReservations?: FileReservation[];
@@ -199,6 +204,8 @@ function defaultAlias(): string {
 export class MeshClient extends EventEmitter {
   /** Current alias — mutable via rename (in-flight alias change). */
   private aliasInternal: string;
+  private semanticIdentityInternal?: SemanticIdentity;
+  private preferredAlias?: string;
   private readonly initialRooms: string[];
   /** All rooms this client is (or will be) a member of — re-declared at hello. */
   private readonly joinedRooms: Set<string>;
@@ -277,6 +284,8 @@ export class MeshClient extends EventEmitter {
 
   constructor(opts: MeshClientOpts = {}) {
     super();
+    this.semanticIdentityInternal = opts.semanticIdentity === undefined ? undefined : { ...opts.semanticIdentity };
+    this.preferredAlias = opts.preferredAlias;
     this.aliasInternal = normalizeAlias(opts.alias ?? defaultAlias());
     this.initialRooms = opts.rooms ?? [...DEFAULT_CONFIG.rooms];
     this.joinedRooms = new Set(this.initialRooms);
@@ -292,6 +301,10 @@ export class MeshClient extends EventEmitter {
 
   get alias(): string {
     return this.aliasInternal;
+  }
+
+  get semanticIdentity(): SemanticIdentity | undefined {
+    return this.semanticIdentityInternal === undefined ? undefined : { ...this.semanticIdentityInternal };
   }
 
   /** All rooms this client is a member of (re-declared at every hello). */
@@ -678,7 +691,7 @@ export class MeshClient extends EventEmitter {
         return await this.doConnect();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (!msg.includes("alias_taken")) throw err;
+        if (!msg.includes("alias_taken") || this.semanticIdentityInternal !== undefined) throw err;
         if (attempt < ALIAS_RETRY_ATTEMPTS) {
           await sleepMs(ALIAS_RETRY_DELAY_MS * 2 ** attempt);
           continue;
@@ -749,6 +762,8 @@ export class MeshClient extends EventEmitter {
         const hello = buildFrame({
           type: "hello",
           from: this.alias,
+          semanticIdentity: this.semanticIdentityInternal,
+          preferredAlias: this.preferredAlias,
           rooms: [...this.joinedRooms],
           reservations: this.ownReservations.length > 0 ? [...this.ownReservations] : undefined,
           token: this.config.brokerToken !== undefined ? sha256(this.config.brokerToken) : undefined,
@@ -772,6 +787,10 @@ export class MeshClient extends EventEmitter {
           if (!settled) {
             if (frame.type === "welcome") {
               settled = true;
+              if (frame.from !== undefined) {
+                this.aliasInternal = frame.from;
+                this.preferredAlias = frame.from;
+              }
               clearTimeout(this.helloTimer ?? undefined);
               this.online = true;
               this.reconnectAttempt = 0;
@@ -872,6 +891,48 @@ export class MeshClient extends EventEmitter {
     this.watchdogTimer = null;
   }
 
+  private applyAliasChange(oldAlias: string, newAlias: string): void {
+    if (oldAlias === newAlias) return;
+    if (this.aliasInternal === oldAlias) {
+      const own = this.peerReservations.get(oldAlias);
+      this.peerReservations.delete(oldAlias);
+      this.aliasInternal = newAlias;
+      this.preferredAlias = newAlias;
+      if (own !== undefined) this.peerReservations.set(newAlias, own);
+    } else {
+      if (this.peerReservations.has(oldAlias)) {
+        const reservations = this.peerReservations.get(oldAlias);
+        this.peerReservations.delete(oldAlias);
+        if (reservations !== undefined) this.peerReservations.set(newAlias, reservations);
+      }
+      const activity = this.peerActivity.get(oldAlias);
+      if (activity !== undefined) {
+        this.peerActivity.delete(oldAlias);
+        this.peerActivity.set(newAlias, activity);
+      }
+      if (this.knownPeers.delete(oldAlias)) this.knownPeers.add(newAlias);
+    }
+    for (const target of this.awaitTargets.values()) {
+      if (target.to === oldAlias) target.to = newAlias;
+    }
+    for (const mission of this.awaitedMissions.values()) {
+      if (mission.to === oldAlias) mission.to = newAlias;
+    }
+    for (const [id, frame] of this.inbox) {
+      const replyTargets = frame.replyTargets?.map((target) => target === oldAlias ? newAlias : target);
+      if (frame.from !== oldAlias && frame.to !== oldAlias && !replyTargets?.includes(newAlias)) {
+        continue;
+      }
+      this.inbox.set(id, {
+        ...frame,
+        from: frame.from === oldAlias ? newAlias : frame.from,
+        to: frame.to === oldAlias ? newAlias : frame.to,
+        replyTargets,
+      });
+    }
+    this.emit("renamed", { from: oldAlias, to: newAlias });
+  }
+
   private onFrame(frame: MeshFrame): void {
     this.ring(frame);
     switch (frame.type) {
@@ -968,20 +1029,24 @@ export class MeshClient extends EventEmitter {
         this.emit("frame", frame);
         break;
       }
+      case "alias_changed":
+        if (frame.from !== undefined && frame.to !== undefined) this.applyAliasChange(frame.from, frame.to);
+        this.emit("frame", frame);
+        break;
       case "presence":
         if (frame.status === "offline") {
           this.peerReservations.delete(frame.from ?? "");
-          this.peerActivity.delete(frame.from ?? ""); // gone — forget its state
+          this.peerActivity.delete(frame.from ?? "");
           this.knownPeers.delete(frame.from ?? "");
         } else if (frame.status === "online" && frame.from !== undefined) {
-          this.knownPeers.add(frame.from); // joined — the send guard knows it
+          this.knownPeers.add(frame.from);
         }
         this.emit("presence", frame);
         break;
       case "pong":
         break;
-      case "error": {
   // broker refusals carry the original frame id → resolve the waiter
+      case "error": {
         const w = this.ackWaiters.get(frame.id);
         if (w) {
           this.ackWaiters.delete(frame.id);
@@ -1531,6 +1596,27 @@ export class MeshClient extends EventEmitter {
       throw new Error(ack.code ?? "internal");
     }
     this.joinedRooms.delete(room);
+  }
+
+  /** Update the broker-assigned semantic identity without dropping live state. */
+  async updateSemanticIdentity(identity: SemanticIdentity): Promise<{ ok: true; alias: string } | { ok: false; reason: string }> {
+    const previousIdentity = this.semanticIdentityInternal;
+    this.semanticIdentityInternal = { ...identity };
+    if (!this.online) {
+      try { await this.connect(); } catch { this.semanticIdentityInternal = previousIdentity; return { ok: false, reason: "broker_unavailable" }; }
+    }
+    const frame = buildFrame({ type: "identity_update", from: this.alias, semanticIdentity: identity, preferredAlias: this.alias });
+    const oldAlias = this.alias;
+    const ack = await this.roundTrip(frame);
+    if (ack.type === "error") { this.semanticIdentityInternal = previousIdentity; return { ok: false, reason: ack.code ?? "internal" }; }
+    if (this.alias === oldAlias) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 100);
+        timer.unref();
+        this.once("renamed", () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    return { ok: true, alias: this.alias };
   }
 
   /**

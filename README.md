@@ -59,9 +59,9 @@ local broker (NDJSON frames over a unix socket or named pipe, protocol
 - **File reservations** — claim repo paths before editing; other agents'
   `edit`/`write` calls on those paths are blocked with the holder's name.
   Reservations live with the connection and expire via TTL.
-- **Identity persistence** — alias, rooms and reservations survive `/reload`
-  (one file per pi session, never overwritten); `/mesh new` and pi `fork`
-  hand the identity over; `/mesh reset` factory-resets in place.
+- **Identity persistence** — semantic aliases, rooms and reservations survive
+  `/reload` (one file per Pi session, never overwritten); Pi forks hand the
+  identity over to the new session.
 - **Multi-machine** — TCP/TLS broker with a shared token; everything works
   unchanged across machines (VPS, LAN, Tailscale…).
 - **Hash-only ledger** — durable history with bodies never stored, plus an
@@ -86,23 +86,21 @@ npm run build
 ```
 
 Pi auto-loads the project extension. Open **two Pi sessions** in this
-directory (each session gets its own alias):
+directory. Each gets a semantic alias derived from the repository, worktree, and role:
 
-```bash
-# session 1            # session 2
-pi                      pi
-> /mesh alias           > /mesh alias
-# → @agent-a1b2c3       # → @agent-d4e5f6
+```text
+@pi-lpt-mesh-root-agent
+@pi-lpt-mesh-root-agent-2
 ```
 
 Then, in session 1 (tool call by the agent, or ask it):
 
 ```
-mesh_send { "to": "agent-d4e5f6", "message": "hello from A" }
+mesh_send { "to": "pi-lpt-mesh-root-agent-2", "message": "hello from A" }
 # → "delivered m_lxyz_ab12cd34"
 ```
 
-Session 2 receives `[mesh] @agent-a1b2c3 14:32:05 hello from A (m_lxyz_ab12cd34)`
+Session 2 receives `[mesh] @pi-lpt-mesh-root-agent 14:32:05 hello from A (m_lxyz_ab12cd34)`
 as a follow-up turn and answers with
 `mesh_reply { "msgId": "m_lxyz_ab12cd34", "message": "hi A" }`.
 (The short format is the v0.5 default — `contextVerbosity: "full"` restores
@@ -217,30 +215,19 @@ Env overrides: `MESH_ALIAS`, `MESH_ROOMS`, `MESH_RUNTIME_DIR`,
 `MESH_INBOUND_BATCH_MAX_HOLD_MS`, `MESH_POLICY`, `MESH_WATCHDOG=0`,
 `MESH_CONTEXT_VERBOSE=1`.
 
-**Commands** — `/mesh status [room] · join <room> [as <alias>] [observer] ·
-leave <room> · alias [<new-alias>] · new [--history] · reset · log [on|off] ·
-ping <alias> · broker · help`.
+**Commands** — `/mesh status [room] · join <room> [observer] ·
+leave <room> · log [on|off] · ping <alias> · broker · help`.
 
-- `/mesh join ops as agent-1` claims the alias `agent-1` and joins room
-  `ops` in one step (live rename, rooms + reservations re-declared).
-- `/mesh new [--history]` opens a fresh pi session like `/new` but hands
-  over the mesh identity (alias, rooms, reservations; `--history` also
-  transfers the last 30 mesh frames as context). Stale handoffs expire
-  after 15 min.
-- `/mesh reset` factory-resets the identity of the CURRENT session (fresh
-  alias, default rooms, no reservations) without leaving it; `/reload`
-  preserves the identity.
+Aliases are broker-assigned semantic addresses; manual alias overrides are not available.
 - **Identity survives `/reload`**: alias, rooms and reservations are
   persisted in `<stateDir>/identity-<sessionId>.json` — one file per pi
   session, stable across reloads, sessions sharing a stateDir never
   overwrite each other. Stale persisted reservations older than 24 h are
-  dropped at load; if a crashed session still holds the alias, the client
-  falls back to a random one (notified + persisted) instead of looping.
+  dropped at load; the broker assigns the lowest available semantic suffix.
 - **HUD**: a live widget above the editor shows the connection dot, rooms,
   peers with per-agent colors and turn-state markers (`●`/`○`/`✕`),
   pending awaits, transcript state and the last inbound preview.
-- `/mesh broker` reports the version, session file size and compaction
-  count, with a `/mesh new` hint past 15 MB.
+- `/mesh broker` reports the version, session file size and compaction count.
 - `/mesh stale` lists every reservation held by peers with its age —
   the operator sees in one glance who to ping or wait for.
 
@@ -291,12 +278,13 @@ MESH_BROKER_URL=tcp://<machine-A>:8712 MESH_BROKER_TOKEN=change-me pi
 - `MESH_DEBUG=1` (env or `"debug": true` in config.json) logs wire-level
   client lifecycle events to `<stateDir>/client-debug.log` — no bodies.
 - Everything works unchanged across machines: rooms, broadcast, read
-  receipts, mailbox, reservations, turn state (state lives in the broker).
+  receipts, reservations, turn state (state lives in the broker).
   `mesh doctor` checks the endpoint/auth on any machine.
-- Aliases must stay **unique mesh-wide**: prefix per machine
-  (`MESH_ALIAS=pcB-agent-2`). Identities/ledgers stay local to each
-  machine; reservations protect the same repo paths when both machines
-  share the same git checkout (always reserve repo-relative paths).
+- Aliases are complete semantic addresses and stay **unique mesh-wide**;
+  the broker assigns duplicate suffixes. `MESH_ALIAS` is ignored for Pi agents.
+  Identities/ledgers stay local to each machine; reservations protect the same
+  repo paths when both machines share the same git checkout (always reserve
+  repo-relative paths).
 
 ## Reliability notes
 
@@ -308,9 +296,9 @@ MESH_BROKER_URL=tcp://<machine-A>:8712 MESH_BROKER_TOKEN=change-me pi
   self-send block, reply dedup (first answer wins, exact re-sends dropped),
   reply-à-reply protection, `force` requires a reason.
 - **No body is ever persisted** outside the opt-in transcript: the ledger is
-  hash-only with a fail-closed forbidden-key scan; `identity-pending.json`
-  (the `/mesh new --history` handover) is the only opt-in body staging,
-  deleted after consumption.
+  hash-only with a fail-closed forbidden-key scan; staged session handoff
+  history in `identity-pending.json` is the only opt-in body staging, deleted
+  after consumption.
 - **Bounds**: frame 64 KiB, body 32 KiB, mailbox 100/1 h, reminds ≤ 2,
   16 rooms/peer, 64 peers/room — every bound is a named constant.
 - **Broker down** → tools answer `blocked{broker_unavailable}`, never crash.

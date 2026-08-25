@@ -1,6 +1,6 @@
 // extension/attach.ts — client→session wiring, shared by session_start and
-// /mesh reset: both need a fully-wired MeshClient, and reset must be
-// able to REPLACE the client in-place without a pi reload.
+// lifecycle reattachment: both need a fully-wired MeshClient, and the client
+// can be replaced in-place without a Pi reload.
 import { readFileSync } from "node:fs";
 import type { WelcomeInfo } from "../client/client.js";
 import type { MeshFrame } from "../protocol/envelope.js";
@@ -113,8 +113,8 @@ export function updateSessionName(pi: ExtensionAPI, rt: MeshRuntime): void {
 
 /**
  * Attach every client event handler to `client`. `rt` is the CURRENT runtime
- * object (its `.client` field may be replaced later by /mesh reset — the
- * handlers always read the runtime they were attached with, so the reset path
+ * object (its `.client` field may be replaced later by lifecycle reattachment — the
+ * handlers always read the runtime they were attached with, so replacement
  * re-attaches on the new client).
  */
 export function attachClientListeners(
@@ -312,8 +312,8 @@ export function attachClientListeners(
         : "";
     let context =
       `[mesh] you are @${client.alias} (rooms: ${roomList}). ` +
-      `Your alias is stable across /reload; it changes only via /mesh alias, ` +
-      `/mesh reset or /mesh new — if in doubt, mesh_status shows your alias. ` +
+      `Your semantic alias is stable across /reload and follows the repository, ` +
+      `worktree, and role; if in doubt, mesh_status shows your alias. ` +
       `${peerLine}${farLine} ` +
       `mesh_send/mesh_reply to talk, mesh_status for a live snapshot, ` +
       `mesh_reserve to claim files before editing them. ` +
@@ -322,8 +322,8 @@ export function attachClientListeners(
       `mesh_wait_all for the group verdict — never mesh_history to check. ` +
       `ESC cancels a pending mesh_wait_all (verdict CANCELLED, missions stay reportable). ` +
       `mesh_send replyTo: [aliases] designates who receives the reply instead of you.`;
-  // a /mesh new handoff may carry the previous session's history —
-  // inject it as context so the fresh conversation keeps the thread.
+  // A previous lifecycle may carry session history; inject it as context
+  // so the fresh conversation keeps the thread.
     if (rt.pendingHistory !== undefined && rt.pendingHistory.length > 0) {
       context += `\n\n[mesh] transferred history from the previous session:\n${rt.pendingHistory.join("\n")}`;
     }
