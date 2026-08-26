@@ -549,15 +549,8 @@ async function execMeshStatus(
       return textResult("blocked: broker_unavailable", sendDetails({ status: "blocked", reason: "broker_unavailable" }));
     }
   }
-  const snap = await rt.client.status(room);
-  // by default, only peers VISIBLE from this session (sharing at least
-  // one room) are listed — an agent alone in "voice" must not see the
-  // cs-room agents. all:true (or an explicit room filter) lifts that.
-  const mine = new Set(room !== undefined ? [room] : rt.client.rooms);
-  const visible = snap.peers.filter(
-    (p) => p.alias === rt.client.alias || mine.size === 0 || p.rooms.some((r) => mine.has(r)),
-  );
-  const peers = params.all === true ? snap.peers : visible;
+  const snap = await rt.client.status(room, params.all === true);
+  const peers = snap.peers;
   const localVersion = MESH_VERSION;
   // missions FIRST: the summary line needs them (likely-done inference)
   const missions = rt.client.missionStatus();

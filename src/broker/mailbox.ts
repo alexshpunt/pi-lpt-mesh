@@ -2,6 +2,7 @@
 import type { MeshFrame } from "../protocol/envelope.js";
 import type { MeshConfig } from "../shared/config.js";
 import type { BrokerState, StoredMsg } from "./state.js";
+import { canDeliverWorkspace, type WorkspaceDescriptor } from "../shared/workspace.js";
 
 function dropExpired(
   state: BrokerState,
@@ -25,9 +26,11 @@ export function enqueueMailbox(
   alias: string,
   frame: MeshFrame,
   now: number = Date.now(),
+  senderWorkspace?: WorkspaceDescriptor,
+  senderRooms?: string[],
 ): void {
   const queue = dropExpired(state, alias, config.mailboxTtlMs, now);
-  queue.push({ frame, enqueuedAt: now });
+  queue.push({ frame, enqueuedAt: now, senderWorkspace, senderRooms });
   while (queue.length > config.mailboxCap) {
     queue.shift();
     state.stats.mailboxDropped += 1;
@@ -59,11 +62,15 @@ export function flushMailbox(
   config: MeshConfig,
   alias: string,
   now: number = Date.now(),
+  targetWorkspace?: WorkspaceDescriptor,
+  targetRooms: readonly string[] = [],
 ): MeshFrame[] {
   const queue = dropExpired(state, alias, config.mailboxTtlMs, now);
   state.mailbox.delete(alias);
-  state.stats.mailboxDelivered += queue.length;
-  return queue.map((stored) => ({
+  const authorized = queue.filter((stored) => stored.senderWorkspace === undefined || targetWorkspace === undefined || canDeliverWorkspace(stored.senderWorkspace, stored.senderRooms ?? [], targetWorkspace, targetRooms, stored.frame.room ?? "default"));
+  state.stats.mailboxDelivered += authorized.length;
+  state.stats.mailboxDropped += queue.length - authorized.length;
+  return authorized.map((stored) => ({
     ...stored.frame,
     type: "mailbox",
     queuedAt: new Date(stored.enqueuedAt).toISOString(),

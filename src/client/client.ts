@@ -43,6 +43,7 @@ import { MESH_VERSION } from "../shared/version.js";
 import { PendingReplies } from "./pending.js";
 import { backoffMs, ensureBroker } from "./reconnect.js";
 import type { SemanticIdentity } from "../shared/semantic.js";
+import { deriveWorkspace, type WorkspaceDescriptor } from "../shared/workspace.js";
 
 export interface WelcomeInfo {
   alias: string;
@@ -140,6 +141,8 @@ export interface MeshClientOpts {
   alias?: string;
   /** Structured identity; the broker assigns the final semantic alias. */
   semanticIdentity?: SemanticIdentity;
+  /** Logical workspace position for broker isolation. */
+  workspace?: WorkspaceDescriptor;
   /** Reload preference for the broker-assigned semantic alias. */
   preferredAlias?: string;
   rooms?: string[];
@@ -205,6 +208,7 @@ export class MeshClient extends EventEmitter {
   /** Current alias — mutable via rename (in-flight alias change). */
   private aliasInternal: string;
   private semanticIdentityInternal?: SemanticIdentity;
+  private readonly workspace?: WorkspaceDescriptor;
   private preferredAlias?: string;
   private readonly initialRooms: string[];
   /** All rooms this client is (or will be) a member of — re-declared at hello. */
@@ -285,6 +289,7 @@ export class MeshClient extends EventEmitter {
   constructor(opts: MeshClientOpts = {}) {
     super();
     this.semanticIdentityInternal = opts.semanticIdentity === undefined ? undefined : { ...opts.semanticIdentity };
+    this.workspace = opts.workspace === undefined ? deriveWorkspace() : { ...opts.workspace, path: [...opts.workspace.path] };
     this.preferredAlias = opts.preferredAlias;
     this.aliasInternal = normalizeAlias(opts.alias ?? defaultAlias());
     this.initialRooms = opts.rooms ?? [...DEFAULT_CONFIG.rooms];
@@ -540,7 +545,8 @@ export class MeshClient extends EventEmitter {
   /** send a read receipt for an inbound msgId back to its sender. */
   sendRead(msgId: string, to: string): void {
     if (!this.online) return;
-    const frame = buildFrame({ type: "read", from: this.alias, to, reads: msgId });
+    const room = this.inbox.get(msgId)?.room;
+    const frame = buildFrame({ type: "read", from: this.alias, to, room, reads: msgId });
     this.writeOrQueue(frame);
     this.ring(frame);
   }
@@ -763,6 +769,7 @@ export class MeshClient extends EventEmitter {
           type: "hello",
           from: this.alias,
           semanticIdentity: this.semanticIdentityInternal,
+          workspace: this.workspace,
           preferredAlias: this.preferredAlias,
           rooms: [...this.joinedRooms],
           reservations: this.ownReservations.length > 0 ? [...this.ownReservations] : undefined,
@@ -1552,13 +1559,13 @@ export class MeshClient extends EventEmitter {
 
   // ---- status / rooms / close ----
 
-  status(room?: string): Promise<StatusSnapshot> {
+  status(room?: string, all = false): Promise<StatusSnapshot> {
     return new Promise((resolve) => {
       if (!this.online) {
         resolve({ peers: [], rooms: [] });
         return;
       }
-      const frame = buildFrame({ type: "status_req", from: this.alias, room });
+      const frame = buildFrame({ type: "status_req", from: this.alias, room, all });
       const timer = setTimeout(() => {
         this.statusWaiters.delete(frame.id);
         resolve({ peers: [], rooms: [] });

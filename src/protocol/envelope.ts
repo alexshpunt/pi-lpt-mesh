@@ -12,6 +12,7 @@ import {
 } from "../shared/config.js";
 import { makeMsgId, nowIso, sha256 } from "./frames.js";
 import type { SemanticIdentity } from "../shared/semantic.js";
+import { isValidWorkspaceDescriptor, type WorkspaceDescriptor } from "../shared/workspace.js";
 
 export type MeshPriority = "normal" | "urgent" | "force";
 export type MeshRole = "member" | "observer";
@@ -77,6 +78,10 @@ export interface MeshFrame {
   token?: string;
   /** semantic identity supplied by a Pi agent; broker assigns the alias. */
   semanticIdentity?: SemanticIdentity;
+  /** Mandatory logical workspace position (hello only). */
+  workspace?: WorkspaceDescriptor;
+  /** status_req diagnostic visibility bypass. */
+  all?: boolean;
   /** previously assigned semantic alias, used only when its tuple still matches. */
   preferredAlias?: string;
   /** M1: extension version of the sender (hello) — shown in status snapshots
@@ -116,6 +121,7 @@ export const ERROR_CODES = [
   "invalid_frame",
   "oversized",
   "hello_required",
+  "workspace_required",
   "invalid_alias",
   "alias_taken",
   "invalid_room",
@@ -245,6 +251,8 @@ export interface BuildFrameOpts {
   reads?: string;
   token?: string;
   semanticIdentity?: SemanticIdentity;
+  workspace?: WorkspaceDescriptor;
+  all?: boolean;
   preferredAlias?: string;
   /** M1: extension version (hello). */
   clientVersion?: string;
@@ -289,6 +297,8 @@ export function buildFrame(opts: BuildFrameOpts): MeshFrame {
   if (opts.reads !== undefined) frame.reads = opts.reads;
   if (opts.token !== undefined) frame.token = opts.token;
   if (opts.semanticIdentity !== undefined) frame.semanticIdentity = { ...opts.semanticIdentity };
+  if (opts.workspace !== undefined) frame.workspace = { ...opts.workspace, path: [...opts.workspace.path] };
+  if (opts.all !== undefined) frame.all = opts.all;
   if (opts.preferredAlias !== undefined) frame.preferredAlias = opts.preferredAlias;
   if (opts.clientVersion !== undefined) frame.clientVersion = opts.clientVersion;
   if (opts.stats !== undefined) frame.stats = { ...opts.stats };
@@ -341,6 +351,12 @@ export function validateFrame(value: unknown, opts: ValidateOpts = {}): Validati
       return { ok: false, code: "invalid_alias", detail: `bad ${key}` };
     }
   }
+
+  if (value.workspace !== undefined) {
+    if (value.type !== "hello") return { ok: false, code: "invalid_frame", detail: "workspace on non-hello" };
+    if (!isValidWorkspaceDescriptor(value.workspace)) return { ok: false, code: "invalid_frame", detail: "bad workspace" };
+  }
+  if (value.all !== undefined && (value.type !== "status_req" || typeof value.all !== "boolean")) return { ok: false, code: "invalid_frame", detail: "bad all" };
 
   if (value.semanticIdentity !== undefined) {
     if (value.type !== "hello" && value.type !== "identity_update" && value.type !== "alias_changed") {

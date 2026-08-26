@@ -9,6 +9,7 @@ import { joinRoom } from "../src/broker/rooms.js";
 import { BrokerState, type PeerRecord } from "../src/broker/state.js";
 import { buildFrame, parseFrameLine } from "../src/protocol/envelope.js";
 import { sha256 } from "../src/protocol/frames.js";
+import { deriveWorkspace } from "../src/shared/workspace.js";
 import {
   brokerSocketPathOf,
   makeTempDirs,
@@ -284,6 +285,7 @@ describe("broker: presence (E19)", () => {
     };
     const alice: PeerRecord = {
       alias: "alice",
+      workspace: deriveWorkspace(),
       socket: makeFakeSocket(null),
       rooms: new Map(),
       connectedAt: Date.now(),
@@ -293,6 +295,7 @@ describe("broker: presence (E19)", () => {
     };
     const bob: PeerRecord = {
       alias: "bob",
+      workspace: deriveWorkspace(),
       socket: makeFakeSocket(writes),
       rooms: new Map(),
       connectedAt: Date.now(),
@@ -453,7 +456,7 @@ describe("version + stats visibility (M1/M2)", () => {
   it("hello clientVersion is propagated into the status snapshot", async (t) => {
     const { sock } = await withBroker(t);
     const alice = trackRaw(t, await RawClient.connect(sock));
-    alice.send({ type: "hello", from: "v-a", clientVersion: "9.9.9-test" });
+    alice.send({ type: "hello", from: "v-a", clientVersion: "9.9.9-test", workspace: deriveWorkspace() });
     await alice.waitFrame((f) => f.type === "welcome");
     const bob = trackRaw(t, await RawClient.connect(sock));
     bob.hello("v-b");

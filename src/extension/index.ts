@@ -23,6 +23,7 @@ import { analyzeTurn, countRejected, countToolCalls, renderVerdict, type TurnSam
 import type { MeshFrame } from "../protocol/envelope.js";
 import type { SessionContext } from "./pi-types.js";
 import { deriveSemanticIdentity } from "./semantic-identity.js";
+import { deriveWorkspace } from "../shared/workspace.js";
 
 export default function meshExtension(pi: ExtensionAPI): void {
   let runtime: MeshRuntime | null = null;
@@ -114,7 +115,8 @@ export default function meshExtension(pi: ExtensionAPI): void {
         pendingHistory = pending.history;
       }
     }
-    const semanticIdentity = deriveSemanticIdentity(process.cwd());
+    const semanticIdentity = deriveSemanticIdentity(ctx.cwd);
+    const workspace = deriveWorkspace(ctx.cwd);
     if (process.env.MESH_ALIAS !== undefined && process.env.MESH_ALIAS.trim() !== "") {
       ctx.ui.notify("mesh: MESH_ALIAS is ignored; semantic aliases are mandatory", { level: "warning" });
     }
@@ -123,6 +125,7 @@ export default function meshExtension(pi: ExtensionAPI): void {
     const client = new MeshClient({
       alias: sameIdentity ? persisted?.alias : undefined,
       semanticIdentity,
+      workspace,
       preferredAlias: sameIdentity ? persisted?.alias : undefined,
       rooms: persisted !== null && persisted.rooms.length > 0 ? persisted.rooms : config.rooms,
       initialReservations: persisted?.reservations,
@@ -205,7 +208,7 @@ export default function meshExtension(pi: ExtensionAPI): void {
     if (semanticMonitor !== null) clearInterval(semanticMonitor);
     semanticMonitor = setInterval(() => {
       try {
-        const next = deriveSemanticIdentity(process.cwd());
+        const next = deriveSemanticIdentity(ctx.cwd);
         if (JSON.stringify(next) !== JSON.stringify(client.semanticIdentity)) {
           void client.updateSemanticIdentity(next).then(() => saveIdentity(rt));
         }

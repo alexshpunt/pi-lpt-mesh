@@ -6,6 +6,7 @@ import {
   type MeshConfig,
 } from "../shared/config.js";
 import type { BrokerState, PeerRecord } from "./state.js";
+import { canDeliverWorkspace, canSeeWorkspace } from "../shared/workspace.js";
 
 export type RoomResult = { ok: true } | { ok: false; code: MeshErrorCode };
 
@@ -68,12 +69,14 @@ export function broadcastToRoom(
   frame: ReturnType<typeof buildFrame>,
   excludeAlias?: string,
   write?: (peer: PeerRecord, frame: ReturnType<typeof buildFrame>) => void,
+  viewer?: PeerRecord,
 ): void {
   const members = state.rooms.get(roomId);
   if (!members) return;
   for (const alias of members) {
     if (alias === excludeAlias) continue;
     const peer = state.peers.get(alias);
+    if (peer && viewer && !canDeliverWorkspace(viewer.workspace, [...viewer.rooms.keys()], peer.workspace, [...peer.rooms.keys()], roomId)) continue;
     if (peer && write) write(peer, frame);
   }
 }
@@ -85,7 +88,7 @@ export function announceOnline(
   write: (peer: PeerRecord, frame: ReturnType<typeof buildFrame>) => void,
 ): void {
   for (const roomId of peer.rooms.keys()) {
-    broadcastToRoom(state, roomId, presenceFrame(peer.alias, "online", roomId), peer.alias, write);
+    broadcastToRoom(state, roomId, presenceFrame(peer.alias, "online", roomId), peer.alias, write, peer);
   }
 }
 
@@ -104,7 +107,7 @@ export function detachFromRooms(state: BrokerState, peer: PeerRecord): string[] 
 }
 
 /** Peers visible from a set of rooms (union), for welcome/status snapshots. */
-export function peersSnapshot(state: BrokerState, roomId?: string): {
+export function peersSnapshot(state: BrokerState, roomId?: string, viewer?: PeerRecord, all = false): {
   alias: string;
   rooms: string[];
   role?: MeshRole;
@@ -129,6 +132,7 @@ export function peersSnapshot(state: BrokerState, roomId?: string): {
   for (const peer of state.peers.values()) {
     if (!peer.helloDone) continue;
     if (roomId !== undefined && !peer.rooms.has(roomId)) continue;
+    if (viewer && !all && !canSeeWorkspace(viewer.workspace, [...viewer.rooms.keys()], peer.workspace, [...peer.rooms.keys()])) continue;
     const rooms = [...peer.rooms.keys()];
     out.push({
       alias: peer.alias,

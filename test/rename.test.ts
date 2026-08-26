@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { MeshClient } from "../src/client/client.js";
 import { makeTempDirs, startTestBroker, waitFor, type TempDirs } from "./helpers.js";
+import { deriveWorkspace } from "../src/shared/workspace.js";
 
 describe("client: in-flight alias rename", () => {
   let dirs: TempDirs;
@@ -138,6 +139,7 @@ describe("client: in-flight alias rename", () => {
     const fakeSocket = { destroyed: false } as unknown as import("node:net").Socket;
     broker.state.peers.set("bob", {
       alias: "bob",
+      workspace: deriveWorkspace(),
       socket: fakeSocket,
       rooms: new Map(),
       connectedAt: Date.now(),

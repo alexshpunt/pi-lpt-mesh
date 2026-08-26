@@ -13,6 +13,7 @@ import {
   type MeshFrame,
 } from "../src/protocol/envelope.js";
 import { encodeFrame, FrameDecoder } from "../src/protocol/frames.js";
+import { deriveWorkspace } from "../src/shared/workspace.js";
 import {
   DEFAULT_CONFIG,
   DEFAULT_MAX_FRAME_BYTES,
@@ -181,7 +182,7 @@ export class RawClient {
   }
 
   hello(alias: string, rooms?: string[], role?: "member" | "observer"): void {
-    this.send({ type: "hello", from: alias, rooms, role });
+    this.send({ type: "hello", from: alias, rooms, role, workspace: deriveWorkspace() });
   }
 
   close(): void {

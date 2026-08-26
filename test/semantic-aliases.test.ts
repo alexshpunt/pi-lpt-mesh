@@ -12,6 +12,7 @@ import {
   startTestBroker,
 } from "./helpers.js";
 import { deriveSemanticIdentity } from "../src/extension/semantic-identity.js";
+import { deriveWorkspace } from "../src/shared/workspace.js";
 
 interface SemanticIdentity {
   repo: string;
@@ -31,6 +32,7 @@ function helloWithIdentity(
     ts: new Date().toISOString(),
     from: `${identity.repo}-${identity.worktree}-${identity.role}`,
     semanticIdentity: identity,
+    workspace: deriveWorkspace(),
   })}\n`);
 }
 
@@ -79,6 +81,7 @@ describe("broker: semantic agent alias allocation", () => {
       ts: new Date().toISOString(),
       from: "client",
       semanticIdentity: { repo: "___", worktree: "root", role: "agent" },
+      workspace: deriveWorkspace(),
     })}\n`);
     const response = await client.waitFrame((frame) => frame.type === "error");
     assert.equal(response.code, "invalid_alias");

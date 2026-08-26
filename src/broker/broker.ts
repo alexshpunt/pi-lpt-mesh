@@ -39,6 +39,7 @@ import {
 } from "./rooms.js";
 import { BrokerState, type PeerRecord } from "./state.js";
 import { normalizeSemanticIdentity, semanticAlias, type SemanticIdentity } from "../shared/semantic.js";
+import { canDeliverWorkspace, canSeeWorkspace, type WorkspaceDescriptor } from "../shared/workspace.js";
 
 export interface BrokerOptions {
   config: MeshConfig;
@@ -167,7 +168,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
     for (const alias of members) {
       if (alias === from.alias) continue;
       const t = state.peers.get(alias);
-      if (t !== undefined && t.helloDone && !t.socket.destroyed) {
+      if (t !== undefined && t.helloDone && !t.socket.destroyed && canDeliverWorkspace(from.workspace, [...from.rooms.keys()], t.workspace, [...t.rooms.keys()], room)) {
         total += 1;
         const target = t;
         writes.push(
@@ -200,7 +201,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
     for (const alias of targets) {
       if (alias === from.alias) continue;
       const t = state.peers.get(alias);
-      if (t !== undefined && t.helloDone && !t.socket.destroyed) {
+      if (t !== undefined && t.helloDone && !t.socket.destroyed && canDeliverWorkspace(from.workspace, [...from.rooms.keys()], t.workspace, [...t.rooms.keys()], frame.room ?? DEFAULT_ROOM)) {
         total += 1;
         const target = t;
         writes.push(
@@ -229,6 +230,12 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
 // ---- handlers ----
 
   const handleHello = (socket: Socket, frame: MeshFrame): void => {
+    if (frame.workspace === undefined) {
+      sendError(socket, "workspace_required", frame.id, "client upgrade required");
+      socket.destroy();
+      return;
+    }
+    const workspace = frame.workspace as WorkspaceDescriptor;
     let semanticIdentity: SemanticIdentity | undefined;
     let semantic = false;
     let alias = frame.from;
@@ -270,6 +277,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
       alias,
       semanticIdentity,
       semantic,
+      workspace,
       socket,
       rooms: new Map(),
       connectedAt: Date.now(),
@@ -290,7 +298,10 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
     };
     if (semantic) state.semanticAliases.add(alias);
     state.peers.set(alias, peer);
-    if (!semantic) state.knownAliases.set(alias, Date.now());
+    if (!semantic) {
+      state.knownAliases.set(alias, Date.now());
+      state.offlinePeers.set(alias, { workspace, rooms: frame.rooms !== undefined ? [...frame.rooms] : [DEFAULT_ROOM], lastSeenAt: Date.now() });
+    }
 
   // rooms — the hello carries the client's EXACT room list. When the
   // field is present (even empty), it is authoritative: a client that
@@ -312,7 +323,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
       }
     }
 
-    const mailboxFrames = semantic ? [] : flushMailbox(state, config, alias);
+    const mailboxFrames = semantic ? [] : flushMailbox(state, config, alias, Date.now(), workspace, [...peer.rooms.keys()]);
     sendTo(
       peer,
       buildFrame({
@@ -320,7 +331,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
         id: frame.id,
         from: alias,
         rooms: [...peer.rooms.keys()],
-        peers: peersSnapshot(state),
+        peers: peersSnapshot(state, undefined, peer),
         mailboxCount: mailboxFrames.length,
       }),
     );
@@ -363,7 +374,9 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
       }
     }
     const changed = buildFrame({ type: "alias_changed", from: oldAlias, to: nextAlias, semanticIdentity: identity });
-    for (const target of state.peers.values()) sendTo(target, changed);
+    for (const target of state.peers.values()) {
+      if (target.alias !== nextAlias && canSeeWorkspace(peer.workspace, [...peer.rooms.keys()], target.workspace, [...target.rooms.keys()])) sendTo(target, changed);
+    }
     sendAck(peer, frame.id, "ok");
   };
 
@@ -407,8 +420,12 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
       let queued = 0;
       for (const alias of members) {
         if (alias === from.alias) continue;
-        total += 1;
         const t = state.peers.get(alias);
+        const offline = state.offlinePeers.get(alias);
+        const targetWorkspace = t?.workspace ?? offline?.workspace;
+        const targetRooms = t ? [...t.rooms.keys()] : offline?.rooms ?? [];
+        if (targetWorkspace === undefined || !canDeliverWorkspace(from.workspace, [...from.rooms.keys()], targetWorkspace, targetRooms, room)) continue;
+        total += 1;
         if (t !== undefined && t.helloDone && !t.socket.destroyed) {
           const target = t;
           const semanticTarget = target.semantic === true;
@@ -421,7 +438,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
   // identity guard — a re-hello may have replaced the record.
                   if (state.peers.get(target.alias) === target) closePeer(state, target.alias, "write_failure");
                   if (!semanticTarget) {
-                    enqueueMailbox(state, config, target.alias, frame);
+                    enqueueMailbox(state, config, target.alias, frame, Date.now(), from.workspace, [...from.rooms.keys()]);
                     queued += 1;
                   }
                   resolve(false);
@@ -430,7 +447,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
             }),
           );
           } else if (state.knownAliases.has(alias) && !state.semanticAliases.has(alias)) {
-          enqueueMailbox(state, config, alias, frame);
+          enqueueMailbox(state, config, alias, frame, Date.now(), from.workspace, [...from.rooms.keys()]);
           queued += 1;
         }
       }
@@ -460,8 +477,16 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
       return;
     }
     const target = state.peers.get(to);
+    const offline = state.offlinePeers.get(to);
     const knownOnline = target !== undefined && target.helloDone && !target.socket.destroyed;
     if (!knownOnline && (!state.knownAliases.has(to) || state.semanticAliases.has(to))) {
+      state.stats.refused += 1;
+      sendError(from.socket, "peer_not_found", frame.id);
+      return;
+    }
+    const targetWorkspace = target?.workspace ?? offline?.workspace;
+    const targetRooms = target ? [...target.rooms.keys()] : offline?.rooms ?? [];
+    if (targetWorkspace === undefined || !canDeliverWorkspace(from.workspace, [...from.rooms.keys()], targetWorkspace, targetRooms, room)) {
       state.stats.refused += 1;
       sendError(from.socket, "peer_not_found", frame.id);
       return;
@@ -511,14 +536,14 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
           if (semanticTarget) {
             sendAck(from, frame.id, "dropped_offline", interruptStatus);
           } else {
-            enqueueMailbox(state, config, t.alias, routedFrame);
+            enqueueMailbox(state, config, t.alias, routedFrame, Date.now(), from.workspace, [...from.rooms.keys()]);
             sendAck(from, frame.id, "queued_offline", interruptStatus);
           }
         }
       });
     } else {
   // known offline alias → mailbox, THEN ack(queued_offline)
-      enqueueMailbox(state, config, to, routedFrame);
+      enqueueMailbox(state, config, to, routedFrame, Date.now(), from.workspace, [...from.rooms.keys()]);
       state.stats.relayed += 1;
       sendAck(from, frame.id, "queued_offline", interruptStatus);
     }
@@ -532,7 +557,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
   const routeOnlineOnly = (from: PeerRecord, frame: MeshFrame, silentDrop: boolean): void => {
     const to = frame.to;
     const target = to !== undefined ? state.peers.get(to) : undefined;
-    if (target && target.helloDone && !target.socket.destroyed) {
+    if (target && target.helloDone && !target.socket.destroyed && canDeliverWorkspace(from.workspace, [...from.rooms.keys()], target.workspace, [...target.rooms.keys()], frame.room ?? DEFAULT_ROOM)) {
       const t = target;
       writeFrame(t.socket, frame, config.maxFrameBytes, (ok) => {
         if (ok) {
@@ -621,6 +646,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
             buildFrame({ type: "activity", from: peer.alias, status: actState, room: roomId }),
             peer.alias,
             sendTo,
+            peer,
           );
         }
         break;
@@ -635,7 +661,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
           buildFrame({
             type: "status_res",
             id: frame.id,
-            peers: peersSnapshot(state, frame.room),
+            peers: peersSnapshot(state, frame.room, peer, frame.all === true),
             rooms: [...state.rooms.keys()],
   // M2: broker counters ride along — relayed/refused/mailbox
             stats: { relayed: s.relayed, refused: s.refused, mailboxDelivered: s.mailboxDelivered, mailboxDropped: s.mailboxDropped },
@@ -657,6 +683,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
             presenceFrame(peer.alias, "online", frame.room),
             peer.alias,
             sendTo,
+            peer,
           );
         } else {
           sendError(socket, res.code, frame.id);
@@ -679,6 +706,7 @@ function allocateSemanticAlias(state: BrokerState, identity: SemanticIdentity, p
             presenceFrame(peer.alias, "offline", frame.room),
             peer.alias,
             sendTo,
+            peer,
           );
         } else {
           sendError(socket, res.code, frame.id);
@@ -703,6 +731,7 @@ function broadcastReservations(
   });
   for (const p of state.peers.values()) {
     if (p.alias === peer.alias) continue;
+    if (!canSeeWorkspace(peer.workspace, [...peer.rooms.keys()], p.workspace, [...p.rooms.keys()])) continue;
     sendTo(p, frame);
   }
 }
@@ -864,7 +893,10 @@ export function pruneStaleKnownAliases(
 ): void {
   for (const [alias, lastHello] of [...state.knownAliases]) {
     if (state.peers.has(alias) || state.mailbox.has(alias)) continue;
-    if (now - lastHello > maxAgeMs) state.knownAliases.delete(alias);
+    if (now - lastHello > maxAgeMs) {
+      state.knownAliases.delete(alias);
+      state.offlinePeers.delete(alias);
+    }
   }
 }
 
@@ -878,6 +910,8 @@ export function closePeer(
   const peer = state.peers.get(alias);
   if (!peer) return;
   const roomIds = detachFromRooms(state, peer);
+  const formerPeer = { ...peer, rooms: new Map(roomIds.map((room) => [room, "member" as const])) };
+  if (!peer.semantic) state.offlinePeers.set(alias, { workspace: peer.workspace, rooms: roomIds, lastSeenAt: Date.now() });
   state.peers.delete(alias);
   state.semanticAliases.delete(alias);
   if (!peer.socket.destroyed) peer.socket.destroy();
@@ -892,12 +926,14 @@ export function closePeer(
   // encoded); fire-and-forget — broadcast failures are swallowed.
         writeFrame(p.socket, f, maxFrameBytes, () => {});
       },
+      formerPeer,
     );
   }
   // reservations live with the connection — the peer is gone, so
   // notify the remaining peers that its reservations are void.
   if (peer.reservations.length > 0) {
     for (const p of state.peers.values()) {
+      if (!canSeeWorkspace(peer.workspace, roomIds, p.workspace, [...p.rooms.keys()])) continue;
       writeFrame(
         p.socket,
         buildFrame({ type: "reserve", from: alias, reservations: [], id: makeMsgId() }),

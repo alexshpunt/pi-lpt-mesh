@@ -291,10 +291,8 @@ export function attachClientListeners(
       client.sendActivity("idle"); // harmless; keeps presence fresh
     };
     const roomList = (welcome.rooms.length > 0 ? welcome.rooms.join(",") : "default");
-    const myRooms = new Set(roomList.split(","));
     const others = welcome.peers.filter((p) => p.alias !== client.alias);
-    const online = others.filter((p) => p.rooms.some((r) => myRooms.has(r)));
-    const far = others.filter((p) => !p.rooms.some((r) => myRooms.has(r)));
+    const online = others;
   // D40: peers on OTHER machines are tagged with their connection origin
   // (via) so the agent knows who is remote (e.g. a MacBook over the LAN).
     const viaTag = (p: { via?: string }): string =>
@@ -303,18 +301,11 @@ export function attachClientListeners(
       online.length > 0
         ? `Online peers: ${online.map((p) => `@${p.alias}${viaTag(p)}`).join(", ")}.`
         : "Online peers: (none).";
-    const farLine =
-      far.length > 0
-        ? ` Other sessions: ${far
-            .slice(0, 12)
-            .map((p) => `@${p.alias} (${p.rooms.join(",") || "?"})${viaTag(p)}`)
-            .join(", ")}${far.length > 12 ? ` (+${far.length - 12} more)` : ""}.`
-        : "";
     let context =
       `[mesh] you are @${client.alias} (rooms: ${roomList}). ` +
       `Your semantic alias is stable across /reload and follows the repository, ` +
       `worktree, and role; if in doubt, mesh_status shows your alias. ` +
-      `${peerLine}${farLine} ` +
+      `${peerLine} ` +
       `mesh_send/mesh_reply to talk, mesh_status for a live snapshot, ` +
       `mesh_reserve to claim files before editing them. ` +
   // the general orchestrator pattern — launch bursts, wait_all once
