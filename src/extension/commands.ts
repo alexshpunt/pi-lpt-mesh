@@ -3,7 +3,6 @@ import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import type { MeshRole } from "../protocol/envelope.js";
 import { brokerLockPath, brokerSocketPath } from "../shared/paths.js";
 import { MESH_VERSION } from "../shared/version.js";
-import { updateSessionName } from "./attach.js";
 import type { MeshHud } from "./hud.js";
 import { identityFromClient } from "./identity.js";
 import type { ExtensionAPI, SessionContext } from "./pi-types.js";
@@ -74,7 +73,6 @@ async function cmdJoin(
   ctx: SessionContext,
   room: string | undefined,
   observer: boolean,
-  pi: ExtensionAPI,
 ): Promise<void> {
   if (room === undefined) {
     notify(ctx, "usage: /mesh join <room> [observer]");
@@ -85,13 +83,12 @@ async function cmdJoin(
     await rt.client.join(room, role);
     notify(ctx, `mesh: joined ${room} as ${role}`);
     persistIdentity(rt);
-    updateSessionName(pi, rt);
   } catch (err) {
     notify(ctx, `mesh: join failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-async function cmdLeave(rt: MeshRuntime, ctx: SessionContext, room: string | undefined, pi: ExtensionAPI): Promise<void> {
+async function cmdLeave(rt: MeshRuntime, ctx: SessionContext, room: string | undefined): Promise<void> {
   if (room === undefined) {
     notify(ctx, "usage: /mesh leave <room>");
     return;
@@ -100,7 +97,6 @@ async function cmdLeave(rt: MeshRuntime, ctx: SessionContext, room: string | und
     await rt.client.leave(room);
     notify(ctx, `mesh: left ${room}`);
     persistIdentity(rt);
-    updateSessionName(pi, rt);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "not_member") {
@@ -278,12 +274,12 @@ export function registerCommands(
           break;
         case "join": {
           const parsed = parseJoinArgs(rest);
-          await cmdJoin(rt, ctx, parsed.room, parsed.observer, pi);
+          await cmdJoin(rt, ctx, parsed.room, parsed.observer);
           onChanged?.();
           break;
         }
         case "leave":
-          await cmdLeave(rt, ctx, rest[0], pi);
+          await cmdLeave(rt, ctx, rest[0]);
           onChanged?.();
           break;
         case "log":

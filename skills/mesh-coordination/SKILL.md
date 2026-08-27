@@ -13,8 +13,6 @@ duplicates, loops and confusion.
 - Your semantic alias is injected at session start: `[mesh] you are @<repo>-<worktree>-<role>[-index] (rooms: …)`.
   It is **stable across /reload** when the repository, worktree, and role stay the same.
   The broker changes it automatically when those components change; manual alias overrides are not available.
-- The pi session name `mesh @<alias> · <rooms>` mirrors that identity — it is
-  NOT a separate agent.
 - **If in doubt, `mesh_status` shows your alias** (first line) and who is
   online. Never guess who you are from the conversation alone.
 - A session that survives `/reload` keeps the same semantic alias, rooms, and reservations.

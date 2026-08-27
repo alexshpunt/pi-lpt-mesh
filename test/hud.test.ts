@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { computePeerStatus } from "../src/client/client.js";
 import { agentColor } from "../src/extension/colors.js";
-import { updateSessionName } from "../src/extension/attach.js";
 import {
   colorizePeerAliases,
   HUD_ACTIVITY_WINDOW_MS,
