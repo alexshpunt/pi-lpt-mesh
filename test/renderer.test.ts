@@ -1,6 +1,7 @@
 // test/renderer.test.ts — D41: colored rendering (aliases in accent, batch header).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { visibleWidth } from "@mariozechner/pi-tui";
 import { colorizeAliases, renderLiveEntry, renderMeshInbound, renderVerdictEntry } from "../src/extension/renderer.js";
 
 import { agentColor } from "../src/extension/colors.js";
@@ -124,6 +125,43 @@ describe("verdict entry (mesh-verdict, agent-colored backgrounds)", () => {
     const a7 = lines.find((l) => l.includes("@agent-7"))!;
     assert.ok(a7.includes(`\x1b[48;5;${c7.length}m`), "agent-7 color as BACKGROUND");
     assert.ok(a7.includes("NOT ANSWERED"), "missing marker");
+  });
+
+  it("keeps long semantic aliases and replies inside the terminal width", () => {
+    const width = 40;
+    const ansiTheme = {
+      fg: (_c: string, t: string) => `\x1b[38;5;15m${t}\x1b[39m`,
+      bg: (_c: string, t: string) => `\x1b[48;5;236m${t}\x1b[49m`,
+      fgAnsi: () => "\x1b[38;5;15m",
+    };
+    const lines = renderVerdictEntry(
+      {
+        head: "wait_all: 1/1 answered after 2s",
+        answers: [{
+          to: "pi-herdr-name-sync-repo-ale-33-custom-tab-startup-requirements-analyst",
+          response: "Accepted correlated start and a reply that does not fit on one line",
+        }],
+      },
+      width,
+      ansiTheme as never,
+    );
+
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
+  });
+
+  it("keeps a long verdict header inside the terminal width", () => {
+    const width = 20;
+    const ansiTheme = {
+      fg: (_c: string, t: string) => `\x1b[38;5;15m${t}\x1b[39m`,
+      bg: (_c: string, t: string) => `\x1b[48;5;236m${t}\x1b[49m`,
+    };
+    const lines = renderVerdictEntry(
+      { head: "wait_all: 100/100 answered after 30m12s" },
+      width,
+      ansiTheme as never,
+    );
+
+    assert.ok(lines.every((line) => visibleWidth(line) <= width));
   });
 
   it("adaptive contrast: light background → dark text, dark background → light text", () => {

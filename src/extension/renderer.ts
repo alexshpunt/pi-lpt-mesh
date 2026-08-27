@@ -2,8 +2,8 @@
 // the conversation, INSIDE the pi custom-message box (background
 // customMessageBg — the "purple frame" of the default rendering,.
 // Per-agent colors everywhere: simple messages, batches and live entries.
-// No Pi imports except pi-tui helpers (wrap + visibleWidth).
-import { visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+// No Pi imports except pi-tui text-width helpers.
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import { ALIAS_RE, agentColor } from "./colors.js";
 import type { ThemeBg, ThemeColor } from "./pi-types.js";
 
@@ -208,7 +208,7 @@ function verdictLine(
   theme: RenderTheme,
 ): string {
   const color = agentColor(to);
-  const body = `${marker} @${to}: ${text}`;
+  const body = truncateToWidth(`${marker} @${to}: ${text}`, Math.max(0, width));
   const bg = ansiBackground(color, theme);
   // without a theme the agent color is used for the text (plain background)
   if (bg === undefined) return theme.fg(color, body);
@@ -233,17 +233,19 @@ export function renderVerdictEntry(
 ): string[] {
   const head = data?.head ?? "wait_all";
   const out: string[] = [];
-  const pad = (l: string): string => `${l}${" ".repeat(Math.max(0, width - visibleWidth(l)))}`;
+  const fitWidth = Math.max(0, width);
+  const pad = (l: string): string => `${l}${" ".repeat(Math.max(0, fitWidth - visibleWidth(l)))}`;
   // header on the neutral box background, with an empty line ABOVE (the
   // entry must not touch the previous content) and BELOW (before the lines)
   const bg = theme.bg;
   if (bg !== undefined) {
-    out.push(bg("customMessageBg", " ".repeat(Math.max(0, width))));
-    out.push(bg("customMessageBg", pad(theme.fg("accent", `▚ ${head}`))));
-    out.push(bg("customMessageBg", " ".repeat(Math.max(0, width))));
+    const header = truncateToWidth(`▚ ${head}`, fitWidth);
+    out.push(bg("customMessageBg", " ".repeat(fitWidth)));
+    out.push(bg("customMessageBg", pad(theme.fg("accent", header))));
+    out.push(bg("customMessageBg", " ".repeat(fitWidth)));
   } else {
     out.push("");
-    out.push(theme.fg("accent", head));
+    out.push(theme.fg("accent", truncateToWidth(head, fitWidth)));
   }
   // one line per agent, each separated by an empty neutral line (breathing
   // room between the colored blocks)
